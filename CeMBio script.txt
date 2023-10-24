@@ -1,0 +1,670 @@
+library("dada2")
+library(phyloseq); packageVersion("phyloseq")
+library(Biostrings); packageVersion("Biostrings")
+library(ggplot2); packageVersion("ggplot2")
+library(ggforce)
+library(RColorBrewer)
+library(dplyr)
+library(vegan)
+library(indicspecies)
+library(DECIPHER)
+library(phangorn)
+library(decontam)
+library(microshades)
+library(hrbrthemes)
+library(scales)
+library(picante)
+library(DESeq2)
+library(rbiom)
+library(MiRKAT)
+library(Matrix)
+library(MatrixModels)
+
+path <- "C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Illumina\\3.15.23\\CeMBio"
+list.files(path)
+
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2_001.fastq", full.names = TRUE))
+
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+
+
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs,
+                     maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE,
+                     compress=TRUE, multithread=FALSE) # On Windows set multithread=FALSE
+head(out)
+
+
+errF <- learnErrors(filtFs, multithread=TRUE)
+errR <- learnErrors(filtRs, multithread=TRUE)
+
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE, minOverlap = 6)
+
+seqtab <- makeSequenceTable(mergers)
+
+
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+#dim(seqtab.nochim)
+
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+
+colnames(track) <- c("reads", "filtered", "dadaFs", "dadaRs", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+
+taxa_CB <- assignTaxonomy(seqtab.nochim,
+                          "C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Illumina\\Cembio_improved.fasta", 
+                          multithread=TRUE)
+
+samdf <- read.csv("C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Illumina\\3.15.23\\CeMBio\\metadata.csv")
+rownames(samdf) <- rownames(seqtab.nochim)
+
+#colors
+qual_col_pals = brewer.pal.info[brewer.pal.info$category == 'qual',]
+colvec = unlist(mapply(brewer.pal, qual_col_pals$maxcolors, rownames(qual_col_pals)))
+colvec <- c(colvec, colvec)
+colvec <- c(colvec, colvec)
+colvec <- c(colvec, colvec)
+colvec <- c(colvec, colvec)
+colvec <- c(colvec, colvec)
+colvec <- c(colvec)[c(1:7,9:14,16:1000)]
+
+#phyloseq
+ps_CB <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
+                  tax_table(taxa_CB),
+                  sample_data(samdf))
+dna <- Biostrings::DNAStringSet(taxa_names(ps_CB))
+names(dna) <- taxa_names(ps_CB)
+ps_CB <- merge_phyloseq(ps_CB, dna)
+taxa_names(ps_CB) <- paste0("ASV", seq(ntaxa(ps_CB)))
+
+taxa.df <- as.data.frame(ps_CB@tax_table)
+seqtab.nochim.df <- t(as.data.frame(ps_CB@otu_table))
+TaxaCounts <- cbind(taxa.df, seqtab.nochim.df)
+
+#relabun
+relabun <- function(Level, Taxon){
+  #Translate Level to Number
+  for(i in 1:7){
+    taxonomic <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+    if(Level == taxonomic[i]){Level <- i} 
+    Level
+  }
+  #Define Total Reads
+  total_reads <- numeric(nrow(samdf))
+  for(i in 8:ncol(TaxaCounts)) {
+    total_reads[i-7] = sum(TaxaCounts[,i])
+  }
+  
+  
+  Tax <- TaxaCounts[!is.na(TaxaCounts[,Level]),][TaxaCounts[!is.na(TaxaCounts[,Level]),][,Level] == Taxon,]
+  
+  output <- numeric(nrow(samdf))
+  for(i in 1:nrow(samdf)) {
+    output[i] = sum(Tax[,i+7])/total_reads[i]
+  }
+  output
+}
+
+#Species
+species <- as.vector(levels(as.factor(TaxaCounts$Species)))
+SpeciesCounts <- matrix(0, nrow=nrow(samdf), ncol = length(species))
+for (i in seq_along(species)){
+  SpeciesCounts[,i] <- relabun("Species", as.character(species[i])) 
+}
+colnames(SpeciesCounts) <- as.character(species)
+write.csv(SpeciesCounts, "C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Microbiome Composition\\3.15.23\\CeMBio\\CB_species.csv")
+
+Species_CB <- read.csv("C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Microbiome Composition\\3.15.23\\CeMBio\\CB_Species_Ordered.csv")
+Species_CB <- c(Species_CB[,1]) 
+
+#Family
+family <- as.vector(levels(as.factor(TaxaCounts$Family)))
+FamilyCounts <- matrix(0, nrow(samdf), ncol = length(family))
+for (i in seq_along(family)){
+  FamilyCounts[,i] <- relabun("Family", as.character(family[i])) 
+}
+colnames(FamilyCounts) <- as.character(family)
+write.csv(FamilyCounts, "C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Microbiome Composition\\3.15.23\\CeMBio\\CB_family.csv")
+
+Family_CB <- read.csv("C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Microbiome Composition\\3.15.23\\CeMBio\\CB_Family_Ordered.csv")[,1]
+
+Sample_Order <- read.csv("C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Microbiome Composition\\3.15.23\\CeMBio\\Sample_Order.csv")[,1]
+
+#Advanced Barplot
+ps_CB <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
+                  tax_table(taxa_CB),
+                  sample_data(samdf))
+dna <- Biostrings::DNAStringSet(taxa_names(ps_CB))
+names(dna) <- taxa_names(ps_CB)
+ps_CB <- merge_phyloseq(ps_CB, dna)
+taxa_names(ps_CB) <- paste0("ASV", seq(phyloseq::ntaxa(physeq = ps_CB)))
+ps_CB <- subset_samples(ps_CB, Type != "control")
+
+#remove NA
+taxa_CB.df <- as.data.frame(ps_CB@tax_table)
+num <- numeric(nrow(taxa_CB.df))
+for(i in 1:nrow(taxa_CB.df)){
+  num[i] <- i
+}
+num <- as.character(num)
+taxa_CB.df <- cbind(taxa_CB.df, num)
+taxa_CB.df[is.na(taxa_CB.df)] <- 0
+
+zeros <- taxa_CB.df[taxa_CB.df$Species != 0,]
+
+ASVs <- numeric(length(zeros$num))
+for(i in 1:length(zeros$num)){
+  ASVs[i] <- paste("ASV",zeros$num[i], sep = "")
+}
+ps_CB <- prune_taxa(ASVs, ps_CB)
+
+microbiomeCB <- psmelt(transform_sample_counts(ps_CB, function(OTU) OTU/sum(OTU)))
+#microbiomeCB$Species <- factor(microbiomeCB$Species, levels = Species_CB)
+microbiomeCB$Family <- factor(microbiomeCB$Family, levels = Family_CB)
+microbiomeCB$Sample <- factor(microbiomeCB$Sample, levels = Sample_Order)
+
+ggplot(microbiomeCB, aes(x=Sample, y = Abundance)) + #facet_wrap(~Type, scales="free_x") + #theme(legend.position="none") +
+  geom_bar(aes(fill = Family), stat="identity", position="stack") + scale_fill_manual(values=colvec) + 
+  theme(axis.text.x = element_text(angle = 90)) 
+
+#Phylogenetic Tree
+sequences<- getSequences(seqtab.nochim)
+names(sequences) <- sequences
+alignment <- AlignSeqs(DNAStringSet(sequences), anchor=NA)
+phang.align <- phyDat(as(alignment, "matrix"), type="DNA")
+dm <- dist.ml(phang.align)
+treeNJ <- NJ(dm) # Note, tip order != sequence order
+fit = pml(treeNJ, data=phang.align)
+fitGTR <- update(fit, k=4, inv=0.2)
+fitGTR <- optim.pml(fitGTR, model="GTR", optInv=TRUE, optGamma=TRUE,
+                    rearrangement = "stochastic", control = pml.control(trace = 0))
+
+
+#NMDS
+ps_CB <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
+                  tax_table(taxa_CB), phy_tree(fitGTR$tree), sample_data(samdf))
+dna <- Biostrings::DNAStringSet(taxa_names(ps_CB))
+names(dna) <- taxa_names(ps_CB)
+ps_CB <- merge_phyloseq(ps_CB, dna)
+taxa_names(ps_CB) <- paste0("ASV", seq(ntaxa(ps_CB)))
+ps_CB <- subset_samples(ps_CB, Type != "control")
+ps_CB <- subset_samples(ps_CB, Type != "innoculum")
+ps_CB@sam_data$Worm <- factor(ps_CB@sam_data$Worm, levels = c("N2","scl-2","lys-7",
+                                                              "clec-52","nuc-1","clec-66"))
+
+ps.prop <- transform_sample_counts(ps_CB, function(otu) otu/sum(otu))
+ord.nmds.bray <- ordinate(ps.prop, method="PCoA", distance="wunifrac")
+
+plot_ordination(ps.prop, ord.nmds.bray, color = "Worm", shape = "Type",
+                title="PCoA") + geom_point(size = 8) + 
+  geom_mark_ellipse(aes(color = Worm, fill = Worm))
+
+
+#Faith's Phylogenetic Diversity
+ps_CB <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
+                  tax_table(taxa_CB), phy_tree(fitGTR$tree), sample_data(samdf))
+dna <- Biostrings::DNAStringSet(taxa_names(ps_CB))
+names(dna) <- taxa_names(ps_CB)
+ps_CB <- merge_phyloseq(ps_CB, dna)
+taxa_names(ps_CB) <- paste0("ASV", seq(ntaxa(ps_CB)))
+ps_CB <- subset_samples(ps_CB, Type != "control")
+ps_CB <- subset_samples(ps_CB, Type != "innoculum")
+ps_CB@sam_data$Worm <- factor(ps_CB@sam_data$Worm, levels = c("N2","scl-2","lys-7",
+                                                              "clec-52","nuc-1","clec-66"))
+
+phy_tree(ps_CB) <- root(phy_tree(ps_CB), sample(taxa_names(ps_CB), 1), resolve.root = TRUE)
+
+
+psOTU <- as.data.frame(ps_CB@otu_table)
+pstree <- ps_CB@phy_tree
+
+phylo_div <- pd(psOTU, pstree,include.root=TRUE)
+phylo_div <- cbind(phylo_div$PD, as.data.frame(ps_CB@sam_data))
+colnames(phylo_div)[1] <- "PD" 
+
+ggplot(phylo_div, aes(x=Worm, y=PD)) + geom_point(aes(color= Worm, shape = Type), size = 10) + 
+  theme(axis.text.x = element_text(angle = 90)) + facet_wrap(~Type, scales="free_x")
+
+#CeMbio species-level strain-enrichment
+TaxaCounts2 <- na.omit(TaxaCounts)
+
+for(i in 1:nrow(TaxaCounts2)){
+  if(TaxaCounts2$Species[i] == "JUb66"){
+    TaxaCounts2$Species[i] <- "CEent1"
+    
+  }
+}
+species <- as.vector(levels(as.factor(TaxaCounts2$Species)))
+SpeciesCounts <- matrix(0, nrow=nrow(samdf), ncol = length(species))
+for (i in seq_along(species)){
+  SpeciesCounts[,i] <- relabun("Species", as.character(species[i])) 
+}
+colnames(SpeciesCounts) <- as.character(species)
+
+CB_enrich_df <- cbind(samdf, SpeciesCounts)
+strains <- c("scl-2","lys-7", "clec-52","nuc-1","clec-66")
+species <- as.vector(levels(as.factor(TaxaCounts2$Species)))
+results <- matrix(nrow = length(strains), ncol = length(species), 0)
+colnames(results) <- species
+rownames(results) <- strains
+CB_enrich_df <- CB_enrich_df[CB_enrich_df$Type == "Worm",]
+
+for(i in 1:length(strains)){
+  
+  for(j in 1:length(species)){
+    results[i,j] <- (sum(CB_enrich_df[CB_enrich_df$Worm == strains[i],j+4])/3)/
+      sum(CB_enrich_df[CB_enrich_df$Worm == "N2",j+4]/3)
+    
+  }
+  
+}
+write.csv(results, 
+          "C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Microbiome Composition\\3.15.23\\CeMBio\\Normalized\\CB_species_strain_enrichment.csv")
+
+#write.csv(results, "C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Microbiome Composition\\3.15.23\\CeMBio\\CB_species_strain_enrichment.csv")
+
+for(i in 1:length(strains)){
+  
+  for(j in 1:length(species)){
+    results[i,j] <- t.test(x = CB_enrich_df[CB_enrich_df$Worm == strains[i],j+4],
+                           y = CB_enrich_df[CB_enrich_df$Worm == "N2",j+4] , "greater")$p.value
+    
+  }
+  
+}
+
+#write.csv(results, "C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Microbiome Composition\\3.15.23\\CeMBio\\CB_species_strain_enrichment_pvalue.csv")
+write.csv(results, "C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Microbiome Composition\\3.15.23\\CeMBio\\Normalized\\CB_species_strain_enrichment_pvalue.csv")
+
+#CeMbio family-level strain-enrichment
+family <- as.vector(levels(as.factor(TaxaCounts$Family)))
+FamilyCounts <- matrix(0, nrow=nrow(samdf), ncol = length(family))
+for (i in seq_along(family)){
+  FamilyCounts[,i] <- relabun("Family", as.character(family[i])) 
+}
+colnames(FamilyCounts) <- as.character(family)
+
+CB_enrich_df <- cbind(samdf, FamilyCounts)
+
+strains <- c("scl-2","lys-7", "clec-52","nuc-1","clec-66")
+family <- as.vector(levels(as.factor(TaxaCounts$Family)))
+results <- matrix(nrow = length(strains), ncol = length(family), 0)
+colnames(results) <- family
+rownames(results) <- strains
+CB_enrich_df <- CB_enrich_df[CB_enrich_df$Type == "Worm",]
+
+for(i in 1:length(strains)){
+  
+  for(j in 1:length(family)){
+    results[i,j] <- (sum(CB_enrich_df[CB_enrich_df$Worm == strains[i],j+4])/3)/
+      sum(CB_enrich_df[CB_enrich_df$Worm == "N2",j+4]/3)
+    
+  }
+  
+}
+
+#write.csv(results, "C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Microbiome Composition\\3.15.23\\CeMBio\\CB_family_strain_enrichment.csv")
+write.csv(results, "C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Microbiome Composition\\3.15.23\\CeMBio\\Normalized\\CB_family_strain_enrichment.csv")
+
+
+for(i in 1:length(strains)){
+  
+  for(j in 1:length(family)){
+    results[i,j] <- t.test(x = CB_enrich_df[CB_enrich_df$Worm == strains[i],j+4],
+                           y = CB_enrich_df[CB_enrich_df$Worm == "N2",j+4], "greater")$p.value
+    
+  }
+  
+}
+
+#write.csv(results, "C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Microbiome Composition\\3.15.23\\CeMBio\\CB_family_strain_enrichment_pvalue.csv")
+write.csv(results, "C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Microbiome Composition\\3.15.23\\CeMBio\\Normalized\\CB_family_strain_enrichment_pvalue.csv")
+
+
+#enrichment Heat-Maps
+table <- read.csv("C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Microbiome Composition\\3.15.23\\CeMBio\\CB_family_strain_enrichment_df.csv")
+
+table$x <- factor(table$x, levels=rev(Species_CB))
+#table$x <- factor(table$x, levels=rev(Family_CB))
+table$y <- factor(table$y, levels=(strains))
+
+for(i in 1:nrow(table)){
+  if(table[i,3] > 3) {
+    table[i,3] <- 3
+    table
+  }
+}
+
+for(i in 1:nrow(table)){
+  if(table[i,3] < -2) {
+    table[i,3] <- -2
+    table
+  }
+}
+
+my_breaks <- c(-2,0,4)
+#my_breaks <- c(0,10^.05,3)
+
+ggplot(table, aes(y, x, fill = z)) + 
+  geom_tile() + scale_fill_gradient2(name = "-log2(enrichment)",
+                                     breaks = my_breaks, labels = my_breaks, 
+                                     low="#006496", mid = "white", high="#960000", midpoint = 0) + 
+  theme_minimal()
+
+
+
+#normalized for 16S copy number
+CB_copy_num <- read.csv("C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Illumina\\CeMBio 16S gene copy number.csv")
+microbiomeCB <- psmelt(transform_sample_counts(ps_CB, function(OTU) OTU/sum(OTU)))
+
+for(j in 1:nrow(CB_copy_num)){
+  
+  for(i in 1:nrow(microbiomeCB)){
+    if(microbiomeCB$Species[i] == CB_copy_num$Strain[j]){
+      microbiomeCB$Abundance[i] <- microbiomeCB$Abundance[i]/CB_copy_num$rRNA[j]
+    }
+  }
+}
+
+for(j in 1:length(Sample_Order)){
+  sum <- sum(microbiomeCB[microbiomeCB$Sample == Sample_Order[j],3])
+  for(i in 1:nrow(microbiomeCB)){
+    
+    if(microbiomeCB$Sample[i] == Sample_Order[j]){
+      microbiomeCB$Abundance[i] <- microbiomeCB$Abundance[i]/sum
+    }
+  }
+}
+#Advanced Plotting
+Family_CB <- read.csv("C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Microbiome Composition\\3.15.23\\CeMBio\\CB_Family_Ordered.csv")[,1]
+Family_CB <- c(Family_CB[1],Family_CB[3],Family_CB[2],Family_CB[4:8])
+Species_CB <- read.csv("C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Microbiome Composition\\3.15.23\\CeMBio\\CB_Species_Ordered.csv")[,1]
+Species_CB <- c(Species_CB[1],Species_CB[3],Species_CB[2],Species_CB[4:9])
+
+microbiomeCB$Species <- factor(microbiomeCB$Species, levels = Species_CB)
+microbiomeCB$Family <- factor(microbiomeCB$Family, levels = Family_CB)
+microbiomeCB$Sample <- factor(microbiomeCB$Sample, levels = Sample_Order)
+
+ggplot(microbiomeCB, aes(x=Sample, y = Abundance)) + #facet_wrap(~Type, scales="free_x") + #theme(legend.position="none") +
+  geom_bar(aes(fill = Species), stat="identity", position="stack") + scale_fill_manual(values=colvec) + 
+  theme(axis.text.x = element_text(angle = 90)) 
+
+#TaxaCounts
+TaxaCounts <- cbind(taxa.df, seqtab.nochim.df)
+TaxaCounts <- na.omit(TaxaCounts)
+
+for(j in 8:ncol(TaxaCounts)){
+  
+  for(k in 1:nrow(CB_copy_num)){
+    
+    for(i in 1:nrow(TaxaCounts)){
+      if(TaxaCounts$Species[i] == CB_copy_num$Strain[k]){
+        TaxaCounts[i,j] <- TaxaCounts[i,j]/CB_copy_num$rRNA[k]
+      }
+    }  
+    
+  }
+}
+#create new column for scale
+test <- numeric(nrow(microbiomeCB))
+for(i in 1:nrow(microbiomeCB)){
+  if(microbiomeCB$Type[i] == "Worm"){
+    test[i] <- microbiomeCB$Worm[i]
+  } else {
+    test[i] <- "Control"
+  } 
+  test
+}
+
+#recolor
+colvec2 <- c(
+  '#47697E',
+  '#5B7444',
+  '#BEAED4',
+  '#885588',
+  '#649F8E',
+  '#9DBDC9',
+  '#EBCCCC',
+  '#CD7B7B')
+
+Family_CB2 <- c(Family_CB[1:5],Family_CB[7:8],"Enterobacteriaceae")
+microbiomeCB$Family <- factor(microbiomeCB$Family, levels = Family_CB2)
+microbiomeCB2 <- cbind(microbiomeCB, test)
+microbiomeCB2$test <- factor(microbiomeCB2$test, levels = c("Control","N2","scl-2","lys-7","clec-52",
+                                                            "nuc-1","clec-66"))
+
+ggplot(microbiomeCB2, aes(x=Sample, y = Abundance)) + facet_wrap(~test, scales="free_x", nrow = 1) + #theme(legend.position="none") +
+  geom_bar(aes(fill = Family), stat="identity", position="stack") + scale_fill_manual(values=colvec2) + 
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_y_continuous(expand = c(0,0),limits = c(0, 1.05))+
+  theme_classic()+theme(axis.line = element_line(colour = "#424949", size = 1),
+                        axis.ticks.y = element_line(colour = "#424949", size = 1),
+                        axis.ticks.length.y = unit(.25, "cm"), 
+                        axis.ticks.x = element_blank(),
+                        axis.text.x = element_blank())
+colvec <- c(
+  '#506432',
+  '#B4646E',
+  '#47697E',
+  '#885588',
+  '#885588',
+  '#885588'
+)
+
+plot_ordination(ps.prop, ord.nmds.bray, color = "Worm", shape = "Type",
+                title="PCoA") + geom_point(size = 8) + 
+  geom_mark_ellipse(aes(color = Worm, fill = Worm)) + 
+  scale_fill_manual(values=colvec)+scale_color_manual(values=colvec)
+
+#Permanova
+samdf2 <- mutate(samdf, Mutant = ifelse(samdf$Worm == "N2", "WT","MUT"))
+ps_CB <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
+                  tax_table(taxa_CB), phy_tree(fitGTR$tree), sample_data(samdf2))
+dna <- Biostrings::DNAStringSet(taxa_names(ps_CB))
+names(dna) <- taxa_names(ps_CB)
+ps_CB <- merge_phyloseq(ps_CB, dna)
+ps_CB <- subset_samples(ps_CB, Type != "control")
+ps_CB <- subset_samples(ps_CB, Type != "innoculum")
+ps_CB <- subset_samples(ps_CB, Type != "Lawn")
+ps_CB <- subset_samples(ps_CB, Worm == "N2" | Worm == "nuc-1")
+ps.prop <- transform_sample_counts(ps_CB, function(otu) otu/sum(otu))
+
+distance_matrix <- unifrac(t(ps.prop@otu_table@.Data), tree = phy_tree(fitGTR$tree), weighted = TRUE)
+#distance_matrix <- unifrac(t(ps_CB@otu_table@.Data), weighted = TRUE, tree = phy_tree(fitGTR$tree))
+#distance_matrix <- beta.div(t(ps.prop@otu_table@.Data), method = "bray-curtis", weighted=TRUE)
+
+permanova <- adonis(distance_matrix ~ ps_CB@sam_data$Mutant)
+permanova$aov.tab
+MRPP <- mrpp(distance_matrix, grouping = ps_CB@sam_data$Mutant)
+MRPP$Pvalue
+anosim(distance_masamdf2 <- mutate(samdf, Mutant = ifelse(samdf$Worm == "N2", "WT","MUT")))
+
+#MiRKAT
+samdf2 <- mutate(samdf, Mutant = ifelse(samdf$Worm == "N2", "WT","MUT"))
+ps_CB <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
+                  tax_table(taxa_CB), phy_tree(fitGTR$tree), sample_data(samdf2))
+dna <- Biostrings::DNAStringSet(taxa_names(ps_CB))
+names(dna) <- taxa_names(ps_CB)
+ps_CB <- merge_phyloseq(ps_CB, dna)
+ps_CB <- subset_samples(ps_CB, Type != "control")
+ps_CB <- subset_samples(ps_CB, Type != "innoculum")
+ps_CB <- subset_samples(ps_CB, Type != "Lawn")
+ps_CB <- subset_samples(ps_CB, Worm == "N2" | Worm == "nuc-1")
+
+distance_matrix <- unifrac(t(ps_CB@otu_table@.Data), tree = phy_tree(fitGTR$tree), weighted = TRUE)
+kern_matrix <- D2K(as.matrix(distance_matrix))
+
+samdata <- as.data.frame(ps_CB@sam_data@.Data)
+colnames(samdata) <- colnames(samdf2)
+
+MiRKAT(y=as.numeric(samdata$Mutant == "MUT"), Ks = kern_matrix, out_type = "D", method = "permutation")
+#MiRKAT(y=as.numeric(samdata$Mutant == "MUT"), Ks = kern_matrix)
+
+#species level plotting
+#phyloseq
+ps_CB <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
+                  tax_table(taxa_CB),
+                  sample_data(samdf))
+dna <- Biostrings::DNAStringSet(taxa_names(ps_CB))
+names(dna) <- taxa_names(ps_CB)
+ps_CB <- merge_phyloseq(ps_CB, dna)
+taxa_names(ps_CB) <- paste0("ASV", seq(phyloseq::ntaxa(physeq = ps_CB)))
+ps_CB <- subset_samples(ps_CB, Type != "control")
+
+#remove NA
+taxa_CB.df <- as.data.frame(ps_CB@tax_table)
+num <- numeric(nrow(taxa_CB.df))
+for(i in 1:nrow(taxa_CB.df)){
+  num[i] <- i
+}
+num <- as.character(num)
+taxa_CB.df <- cbind(taxa_CB.df, num)
+taxa_CB.df[is.na(taxa_CB.df)] <- 0
+
+zeros <- taxa_CB.df[taxa_CB.df$Species != 0,]
+
+ASVs <- numeric(length(zeros$num))
+for(i in 1:length(zeros$num)){
+  ASVs[i] <- paste("ASV",zeros$num[i], sep = "")
+}
+ps_CB <- prune_taxa(ASVs, ps_CB)
+
+microbiomeCB <- psmelt(transform_sample_counts(ps_CB, function(OTU) OTU/sum(OTU)))
+#create new column for scale
+test <- numeric(nrow(microbiomeCB))
+for(i in 1:nrow(microbiomeCB)){
+  if(microbiomeCB$Type[i] == "Worm"){
+    test[i] <- microbiomeCB$Worm[i]
+  } else {
+    test[i] <- "Control"
+  } 
+  test
+}
+
+colvec2 <- c(
+  '#47697E',
+  '#5B7444',
+  '#BEAED4',
+  '#885588',
+  '#98B1AA',
+  '#649F8E',
+  '#AEBDCA',
+  '#64939F',
+  '#F2D7D5',
+  '#CD7B7B',
+  '#CD7B7B')
+
+Species_CB2 <- c("JUb19", "MYb71", "BIGb0170","JUb44","MYb10","BIGb0172","MYb11","MSPm1","BIGb0393","CEent1","JUb66")
+microbiomeCB$Species <- factor(microbiomeCB$Species, levels = Species_CB2)
+microbiomeCB2 <- cbind(microbiomeCB, test)
+microbiomeCB2$test <- factor(microbiomeCB2$test, levels = c("Control","N2","scl-2","lys-7","clec-52",
+                                                            "nuc-1","clec-66"))
+microbiomeCB2$Type <- factor(microbiomeCB2$Type, levels = c("innoculum", "Lawn", "Worm"))
+
+ggplot(microbiomeCB2, aes(x=Sample, y = Abundance)) + facet_wrap(~test, scales="free_x", nrow = 1) + #theme(legend.position="none") +
+  geom_bar(aes(fill = Species), stat="identity", position="stack") + scale_fill_manual(values=colvec2) + 
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_y_continuous(expand = c(0,0),limits = c(0, 1.05))+
+  theme_classic()+theme(axis.line = element_line(colour = "#424949", size = 1),
+                        axis.ticks.y = element_line(colour = "#424949", size = 1),
+                        axis.ticks.length.y = unit(.25, "cm"), 
+                        axis.ticks.x = element_blank(),
+                        axis.text.x = element_blank())
+#legend to include JUb134
+colvec3 <- c(
+  '#47697E',
+  '#5B7444',
+  '#BEAED4',
+  '#885588',
+  '#98B1AA',
+  '#649F8E',
+  '#AEBDCA',
+  '#64939F',
+  '#B46493',
+  '#F2D7D5',
+  '#CD7B7B')
+
+#CeMbio species-level strain-enrichment 2.0
+TaxaCounts2 <- na.omit(TaxaCounts)
+
+for(i in 1:nrow(TaxaCounts2)){
+  if(TaxaCounts2$Species[i] == "JUb66"){
+    TaxaCounts2$Species[i] <- "CEent1"
+    
+  }
+}
+species <- as.vector(levels(as.factor(TaxaCounts2$Species)))
+SpeciesCounts <- matrix(0, nrow=nrow(samdf), ncol = length(species))
+for (i in seq_along(species)){
+  SpeciesCounts[,i] <- relabun("Species", as.character(species[i])) 
+}
+colnames(SpeciesCounts) <- as.character(species)
+
+CB_enrich_df <- cbind(samdf, SpeciesCounts)
+strains <- c("scl-2","lys-7", "clec-52","nuc-1","clec-66")
+species <- as.vector(levels(as.factor(TaxaCounts2$Species)))
+results <- matrix(nrow = length(strains), ncol = length(species), 0)
+colnames(results) <- species
+rownames(results) <- strains
+CB_enrich_df <- CB_enrich_df[CB_enrich_df$Type == "Worm",]
+
+for(i in 1:length(strains)){
+  
+  for(j in 1:length(species)){
+    results[i,j] <- (sum(CB_enrich_df[CB_enrich_df$Worm == strains[i],j+4])/3)/
+      sum(CB_enrich_df[CB_enrich_df$Worm == "N2",j+4]/3)
+    
+  }
+  
+}
+#write.csv(results,"C:\\Users\\kenne\\Documents\\Academics\\Research\\Shapira\\Data\\Microbiome Composition\\3.15.23\\CeMBio\\Normalized\\CB_species_strain_enrichment.csv")
+species_enrichment <- cbind(rep(rownames(results), 10),gather(as.data.frame(results), key = "Species", "Enrichment"))
+colnames(species_enrichment)[1] <- "Strain"
+species_enrichment <- cbind(species_enrichment,log(species_enrichment$Enrichment,2))
+colnames(species_enrichment)[4] <- "Log2Enrichment"
+species_enrichment$Species <- factor(species_enrichment$Species, levels=rev(c("JUb19","MYb71","BIGb0170","JUb44","MYb10","BIGb0172","MYb11","MSPm1","JUb134","BIGb0393","CEent1")))
+species_enrichment$Strain <- factor(species_enrichment$Strain, levels=(strains))
+
+for(i in 1:nrow(species_enrichment)){
+  if(species_enrichment[i,4] > 3) {
+    species_enrichment[i,4] <- 3
+    species_enrichment
+  }
+}
+
+for(i in 1:nrow(species_enrichment)){
+  if(species_enrichment[i,4] < -100) {
+    species_enrichment[i,4] <- 0
+    species_enrichment
+  }
+}
+
+
+for(i in 1:nrow(species_enrichment)){
+  if(species_enrichment[i,4] < -2) {
+    species_enrichment[i,4] <- -2
+    species_enrichment
+  }
+}
+
+my_breaks <- c(-2,0,4)
+
+ggplot(species_enrichment, aes(Strain, Species, fill = Log2Enrichment)) + 
+  geom_tile() + scale_fill_gradient2(name = "-log2(enrichment)",
+                                     breaks = my_breaks, labels = my_breaks, 
+                                     low="#006496", mid = "white", high="#960000", midpoint = 0) + 
+  theme_minimal()
+
+
+
+
